@@ -1,0 +1,128 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux
+            os: ubuntu-latest
+            target: linux
+          - platform: windows
+            os: windows-latest
+            target: windows
+          - platform: macos
+            os: macos-latest
+            target: macos
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: 3.44.5
+          cache: true
+      - run: flutter pub get
+      - name: Get compiler dependencies
+        working-directory: packages/compiler_core
+        run: dart pub get
+      - run: >-
+          dart format --output=none --set-exit-if-changed
+          lib test
+          packages/compiler_core/lib packages/compiler_core/test
+          packages/compiler_contracts/lib packages/compiler_contracts/test
+      - run: flutter analyze
+      - run: flutter test
+      - if: matrix.target == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev
+      - run: flutter config --enable-${{ matrix.target }}-desktop
+      - run: flutter build ${{ matrix.target }} --release
+      - name: Build bundled compiler on Unix
+        if: matrix.target != 'windows'
+        shell: bash
+        run: |
+          mkdir -p packages/compiler_core/build
+          dart compile exe packages/compiler_core/bin/arabicc.dart -o packages/compiler_core/build/arabicc
+      - name: Build bundled compiler on Windows
+        if: matrix.target == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force packages/compiler_core/build | Out-Null
+          dart compile exe packages/compiler_core/bin/arabicc.dart -o packages/compiler_core/build/arabicc.exe
+      - name: Bundle compiler on Linux
+        if: matrix.target == 'linux'
+        shell: bash
+        run: |
+          mkdir -p build/linux/x64/release/bundle/compiler
+          cp packages/compiler_core/build/arabicc build/linux/x64/release/bundle/compiler/arabicc
+          cp -R "$FLUTTER_ROOT/bin/cache/dart-sdk" build/linux/x64/release/bundle/compiler/dart-sdk
+      - name: Bundle compiler on Windows
+        if: matrix.target == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build/windows/x64/runner/Release/compiler | Out-Null
+          Copy-Item packages/compiler_core/build/arabicc.exe build/windows/x64/runner/Release/compiler/arabicc.exe
+          Copy-Item "$env:FLUTTER_ROOT\bin\cache\dart-sdk" build/windows/x64/runner/Release/compiler/dart-sdk -Recurse -Force
+      - name: Bundle compiler on macOS
+        if: matrix.target == 'macos'
+        shell: bash
+        run: |
+          mkdir -p build/macos/Build/Products/Release/acsys360.app/Contents/MacOS/compiler
+          cp packages/compiler_core/build/arabicc build/macos/Build/Products/Release/acsys360.app/Contents/MacOS/compiler/arabicc
+          cp -R "$FLUTTER_ROOT/bin/cache/dart-sdk" build/macos/Build/Products/Release/acsys360.app/Contents/MacOS/compiler/dart-sdk
+      - name: Smoke test bundled compiler on Unix
+        if: matrix.target != 'windows'
+        shell: bash
+        run: |
+          if [ "${{ matrix.target }}" = "linux" ]; then
+            compiler_path="build/linux/x64/release/bundle/compiler/arabicc"
+          else
+            compiler_path="build/macos/Build/Products/Release/acsys360.app/Contents/MacOS/compiler/arabicc"
+          fi
+          dart run tool/verify_compiler_bundle.dart --executable "$compiler_path"
+      - name: Smoke test bundled compiler on Windows
+        if: matrix.target == 'windows'
+        shell: pwsh
+        run: dart run tool/verify_compiler_bundle.dart --executable build/windows/x64/runner/Release/compiler/arabicc.exe
+      - name: Package Linux
+        if: matrix.target == 'linux'
+        run: tar -czf acsys360-linux-${{ github.ref_name }}.tar.gz -C build/linux/x64/release bundle
+      - name: Package Windows
+        if: matrix.target == 'windows'
+        shell: pwsh
+        run: Compress-Archive -Path build/windows/x64/runner/Release/* -DestinationPath acsys360-windows-${{ github.ref_name }}.zip
+      - name: Package macOS
+        if: matrix.target == 'macos'
+        run: ditto -c -k --sequesterRsrc --keepParent build/macos/Build/Products/Release/acsys360.app acsys360-macos-${{ github.ref_name }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: acsys360-${{ matrix.platform }}
+          path: |
+            *.tar.gz
+            *.zip
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: dist/*

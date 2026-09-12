@@ -1,0 +1,63 @@
+# عقد الاتصال بين المحرر والمترجم
+
+## الغرض
+
+المحرر والمترجم برنامجان منفصلان. يرسل المحرر طلب ترجمة JSON إلى برنامج المترجم، ثم يستقبل استجابة JSON تحتوي على نتائج المراحل الفعلية. حزمة `packages/compiler_contracts` هي المصدر المشترك للأنواع وقواعد التحقق، ولا تحتوي على منطق Flutter أو filesystem أو parsing.
+
+## الإصدار الحالي
+
+الإصدار الحالي هو `0.5.0`. أضيفت في هذا الإصدار مرحلة `intermediateRepresentation` لتمرير Typed IR الذي تنتجه النواة بعد التحقق من التعليمات والقفزات. يجب أن يظهر الحقل `protocolVersion` في كل طلب واستجابة. يرفض الطرف المستقبل الإصدار غير المدعوم برسالة خطأ واضحة بدل تفسير payload مختلف بصمت.
+
+## طلب الترجمة
+
+يحتوي الطلب على جذر المشروع وقائمة ملفات المصدر. لا يقتصر العقد على الملف النشط؛ فـ `sourcePaths` يمكن أن تحتوي ملفات متعددة، ويحدد `mode` هل العملية على الملف النشط أو المشروع كاملًا. يرسل المحرر أيضًا `sourceTexts` كـ snapshots للنصوص الحالية، لذلك لا تضيع التعديلات غير المحفوظة عند بدء الترجمة. يمكن تحديد `entryPath` عندما يحتاج المترجم إلى ملف دخول واضح.
+
+| الحقل | النوع | الإلزام | المعنى |
+|---|---|---:|---|
+| `protocolVersion` | `String` | نعم | إصدار العقد المدعوم |
+| `rootPath` | `String` | نعم | جذر Workspace |
+| `sourcePaths` | `List<String>` | نعم | ملفات `.arb` الداخلة في العملية، ويجب ألا تكون فارغة |
+| `sourceTexts` | `Map<String, String>` | لا | محتوى snapshots؛ له الأولوية على القراءة من القرص |
+| `mode` | `String` | لا | `active` أو `project`، والافتراضي `project` |
+| `entryPath` | `String?` | لا | ملف الدخول عند الحاجة |
+| `target` | `String` | لا | الهدف؛ `none` أو `dart-native` |
+| `artifactDirectory` | `String?` | لا | مجلد إخراج artifact عند طلب target تنفيذي |
+
+## الاستجابة
+
+الاستجابة typed من أجل منع خلط أخطاء lexer/parser/semantic مع رسائل عامة. يجب أن تبقى القوائم موجودة حتى عند عدم وجود نتائج، لأن غياب المفتاح يسبب اختلافًا غير ضروري بين الاستجابات الناجحة والفاشلة.
+
+| الحقل | النوع | المعنى |
+|---|---|---|
+| `success` | `bool` | نجاح العملية النهائية |
+| `diagnostics` | `List<Diagnostic>` | أخطاء وملاحظات جميع المراحل |
+| `tokens` | `List<ProtocolToken>` | ناتج التحليل المعجمي الحقيقي |
+| `syntaxTree` | `Map?` | شجرة التحليل النحوي عند توفرها |
+| `symbolTable` | `List<SymbolRecord>` | الرموز المستخرجة مع مواقعها |
+| `threeAddressCode` | `List<String>` | الشفرة الوسيطة النصية |
+| `intermediateRepresentation` | `Map?` | Typed IR متحقق منه؛ وفي المشروع متعدد الملفات يضم IR الخاص بكل ملف |
+| `assembly` | `String` | الشفرة التجميعية النصية الناتجة من TAC |
+| `executionOutput` | `List<String>` | أسطر stdout من التنفيذ الفعلي للبرنامج الصحيح داخل compiler runtime |
+| `artifacts` | `List<String>` | مسارات الملفات التنفيذية أو مخرجات البناء؛ تكون فارغة ما لم ينفذ target backend موثوق |
+
+`assembly` في الإصدار الحالي مخرج NASM-like قابل للفحص الأكاديمي، وليس ملفًا assembled. وبالمثل، `executionOutput` لا يُسمى artifact ولا يحوّل interpreter إلى EXE. لا يعيد المترجم مسار artifact وهميًا.
+
+## SourceSpan وDiagnostic
+
+كل موقع مصدر يستخدم `SourceSpan` موحدًا يحتوي `sourcePath` و`offset` و`line` و`column` و`length`. تبدأ أرقام السطر والعمود من واحد، بينما يبدأ `offset` من صفر؛ ويجوز أن يكون `length` صفرًا لتشخيص موضع دون نطاق.
+
+يحتوي `Diagnostic` على `severity` من القيم `info` أو `warning` أو `error`، واسم المرحلة `phase`، ورمز ثابت `code`، ورسالة موجهة للمستخدم، و`span` اختياري. هذا يسمح للمحرر بربط الخطأ بالملف والسطر دون إعادة تحليل النص أو تخمين موقعه.
+
+## قواعد التحقق
+
+تتحقق factories من نوع الحقول الأساسية، وإصدار البروتوكول، وعدم فراغ قائمة المصادر، وصحة أرقام المواقع، وقيم التعدادات. اختبارات `packages/compiler_contracts/test/compilation_protocol_test.dart` تغطي round-trip للطلب والاستجابة، الاستجابة متعددة المراحل، الإصدار غير المدعوم، وقائمة المصادر الفارغة.
+
+## تشغيل المترجم داخل حزمة Desktop
+
+في بيئة التطوير يبقى التشغيل عبر `dart run packages/compiler_core/bin/arabicc.dart --protocol` حتى يمكن تعديل مصدر المترجم بسرعة. أما Release workflow فينفذ `dart compile exe` على runner المنصة، ثم ينسخ الناتج إلى مجلد `compiler` بجوار executable المحرر داخل كل bundle، ويرفق Dart SDK إلى `compiler/dart-sdk` حتى يستطيع target `dart-native` بناء artifact من النسخة المصدرة دون اعتماد على SDK خارجي. عند تشغيل النسخة المصدرة يبحث المحرر عن `compiler/arabicc` أو `compiler/arabicc.exe` ويشغل الملف نفسه مع `--protocol`، ويستبدلها داخليًا بـ `--assist` لطلبات الإكمال والمساعدة. إذا لم يجد الملف المضمّن يعود لمسار التطوير فقط.
+
+لا يعني ذلك أن Windows output ملف EXE منفردًا؛ Flutter Desktop يحتاج executable وDLL و`data` وملفات runtime. الناتج القابل للنقل هو ZIP يحتوي `acsys360.exe` ومجلده الكامل، إضافة إلى `compiler/arabicc.exe` و`compiler/dart-sdk`، وبذلك لا يحتاج المستخدم إلى تثبيت Dart SDK أو توفير مصدر المستودع.
+
+## ما لم ينفذ بعد
+
+العقد يعرّف شكل النقل، وCLI يمرر كل ملف إلى lexer/parser/semantic ثم يجمع النتائج في استجابة project، ويمرر `intermediateRepresentation` بعد بناء Typed IR والتحقق منه، مع تحليل project-level للإجراءات والأنواع المصدرة. لا تُسرّب المتغيرات بين الملفات دون import syntax. يدعم الإصدار `dart-native` طلب بناء artifact في `artifactDirectory`، ويستخدم Dart SDK المضمّن في release أو `DART_EXECUTABLE`/PATH في التطوير، ولا يعيد المسار إلا بعد إنشاء executable والتحقق من وجوده. أما `target: none` فيبقى السلوك الافتراضي المتوافق مع الترجمة والتحليل والتنفيذ الداخلي.
